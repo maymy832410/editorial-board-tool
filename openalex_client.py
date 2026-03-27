@@ -259,10 +259,16 @@ class OpenAlexClient:
         require_orcid: bool = False,
         max_results: int = 2000,
         per_page: int = 200,
+        resume_state: Optional[dict] = None,
     ) -> Generator[dict, None, None]:
         """Search for authors, yielding parsed records with automatic pagination.
 
         When topic IDs exceed 100, runs multiple batched queries and deduplicates.
+
+        Args:
+            resume_state: dict with keys 'batch_idx', 'cursor', 'seen_ids' to resume
+                          from a previous search. Obtain from self.last_search_state
+                          after a search completes or is interrupted.
         """
         base_filter = self._build_base_filter(
             h_index_min=h_index_min, h_index_max=h_index_max,
@@ -272,10 +278,20 @@ class OpenAlexClient:
         all_topic_ids = self._resolve_all_topic_ids(topic_ids, field_id, subfield_ids)
         batches = self._topic_batches(all_topic_ids)
 
+        # Resume from previous state if provided
+        start_batch = 0
+        start_cursor = "*"
         seen_ids: set = set()
-        total_yielded = 0
+        if resume_state:
+            start_batch = resume_state.get("batch_idx", 0)
+            start_cursor = resume_state.get("cursor", "*")
+            seen_ids = set(resume_state.get("seen_ids", []))
 
-        for batch in batches:
+        total_yielded = 0
+        self.last_search_state = None
+
+        for batch_idx in range(start_batch, len(batches)):
+            batch = batches[batch_idx]
             if total_yielded >= max_results:
                 break
 
@@ -285,7 +301,7 @@ class OpenAlexClient:
             else:
                 filter_str = base_filter
 
-            cursor = "*"
+            cursor = start_cursor if batch_idx == start_batch else "*"
             while cursor and total_yielded < max_results:
                 params = {
                     "filter": filter_str,
@@ -296,6 +312,7 @@ class OpenAlexClient:
                 data = self._make_request("authors", params)
                 results = data.get("results", [])
                 if not results:
+                    cursor = None
                     break
 
                 for author in results:
@@ -310,6 +327,18 @@ class OpenAlexClient:
 
                 cursor = data.get("meta", {}).get("next_cursor")
                 time.sleep(0.1)
+
+            # If we hit max_results mid-batch, save state for resume
+            if total_yielded >= max_results and cursor:
+                self.last_search_state = {
+                    "batch_idx": batch_idx,
+                    "cursor": cursor,
+                    "seen_ids": list(seen_ids),
+                }
+                return
+
+        # Search is fully exhausted
+        self.last_search_state = None
 
     def _parse_author(self, author: dict) -> dict:
         """Parse raw OpenAlex author record into app format."""

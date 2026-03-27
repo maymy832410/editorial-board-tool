@@ -139,7 +139,7 @@ h_min = st.sidebar.number_input("Min H-Index", min_value=0, value=DEFAULT_H_INDE
 h_max = st.sidebar.number_input("Max H-Index", min_value=0, value=DEFAULT_H_INDEX_MAX, key="h_max")
 
 st.sidebar.subheader("⚙️ Options")
-max_results = st.sidebar.number_input("Max results", min_value=100, max_value=10000, value=DEFAULT_MAX_RESULTS, step=100, key="max_results")
+max_results = st.sidebar.number_input("Max results per batch", min_value=100, max_value=50000, value=DEFAULT_MAX_RESULTS, step=500, key="max_results")
 require_orcid = st.sidebar.checkbox("Require ORCID", value=False, key="require_orcid")
 
 # ── Exclude filters ──
@@ -268,10 +268,79 @@ if st.button("🔍 Search OpenAlex", type="primary", use_container_width=True):
 
     st.session_state.authors = authors
     st.session_state.search_done = True
+    st.session_state.search_resume_state = client.last_search_state
+    st.session_state.search_total = total
+    # Save search params for Load More
+    st.session_state.last_search_params = {
+        "h_index_min": h_min, "h_index_max": h_max,
+        "country_codes": all_include_codes, "exclude_country_codes": exclude_codes,
+        "topic_ids": topic_ids, "field_id": field_id,
+        "subfield_ids": subfield_ids, "require_orcid": require_orcid,
+    }
     st.success(f"✅ Found **{len(authors)}** authors after filters")
 
-# ── Show current results summary ──
+# ── Show current results summary + Load More ──
 if st.session_state.get("search_done") and st.session_state.get("authors"):
     n = len(st.session_state.authors)
     with_email = sum(1 for a in st.session_state.authors if a.get("email"))
-    st.info(f"Current results: **{n}** authors, **{with_email}** with email. Go to **📋 Results** to review.")
+    total_available = st.session_state.get("search_total", n)
+    st.info(f"Current results: **{n:,}** authors (**{with_email}** with email) out of **{total_available:,}** total. Go to **📋 Results** to review.")
+
+    # Load More button
+    if st.session_state.get("search_resume_state"):
+        st.warning(f"More authors available beyond the current {n:,}. Click below to load the next batch.")
+        if st.button("📥 Load More Authors", type="secondary", use_container_width=True):
+            params = st.session_state.last_search_params
+            resume = st.session_state.search_resume_state
+
+            # Rebuild exclude sets
+            excluded_orcids = set()
+            if st.session_state.get("exclude_invited") and st.session_state.get("db_ready"):
+                try:
+                    from db_client import get_all_sent
+                    for row in get_all_sent():
+                        if row.get("orcid_id"):
+                            excluded_orcids.add(row["orcid_id"])
+                except Exception:
+                    pass
+            # Also exclude already-fetched authors by ID
+            existing_ids = {a.get("author_id") for a in st.session_state.authors if a.get("author_id")}
+
+            retraction_checker = st.session_state.get("retraction_checker")
+            exc_inst = st.session_state.get("exclude_institution", "")
+            exc_retracted = st.session_state.get("exclude_retracted", False)
+
+            new_authors = []
+            progress = st.progress(0, text="Loading more authors...")
+            for i, author in enumerate(client.search_authors(
+                **params,
+                max_results=max_results,
+                resume_state=resume,
+            )):
+                if author.get("author_id") in existing_ids:
+                    continue
+                if author.get("orcid_id") and author["orcid_id"] in excluded_orcids:
+                    continue
+                if exc_inst and author.get("institution"):
+                    if exc_inst.lower() in author["institution"].lower():
+                        continue
+                if retraction_checker and exc_retracted:
+                    result = retraction_checker.check(author.get("name", ""))
+                    if result["match"]:
+                        continue
+                elif retraction_checker:
+                    result = retraction_checker.check(author.get("name", ""))
+                    author["retraction_flag"] = result
+
+                new_authors.append(author)
+                if (i + 1) % 50 == 0:
+                    progress.progress(min((i + 1) / max_results, 1.0), text=f"Loaded {len(new_authors)} more...")
+
+            progress.empty()
+
+            st.session_state.authors.extend(new_authors)
+            st.session_state.search_resume_state = client.last_search_state
+            st.success(f"✅ Loaded **{len(new_authors)}** more authors (total: **{len(st.session_state.authors):,}**)")
+            st.rerun()
+    else:
+        st.caption("All matching authors have been loaded.")
