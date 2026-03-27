@@ -82,7 +82,7 @@ if need_email_count > 0:
 
         def update_progress(done, total, stage):
             if total > 0:
-                progress_bar.progress(done / total, text=f"{stage}: {done}/{total}")
+                progress_bar.progress(min(done / total, 1.0), text=f"{stage}: {done}/{total}")
 
         # Run async pipeline
         loop = asyncio.new_event_loop()
