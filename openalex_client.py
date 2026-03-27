@@ -17,6 +17,7 @@ class OpenAlexClient:
         self.session.headers.update({
             "User-Agent": f"EditorialBoardTool/2.0 (mailto:{email})"
         })
+        self._topic_cache: dict[str, List[str]] = {}
 
     def _make_request(self, endpoint: str, params: dict, max_retries: int = 3) -> dict:
         """Make a request with retry logic and exponential backoff."""
@@ -105,7 +106,107 @@ class OpenAlexClient:
                 continue
         return list(topic_ids), topic_details
 
+    # ── Topic resolution ────────────────────────────────────────────
+
+    def resolve_topic_ids_for_subfields(self, subfield_ids: List[str]) -> List[str]:
+        """Fetch all topic IDs that belong to the given subfields.
+
+        The /authors endpoint only supports `topics.id`, not `topics.subfield.id`,
+        so we must resolve subfields → topic IDs first.
+        """
+        cache_key = "sf:" + ",".join(sorted(subfield_ids))
+        if cache_key in self._topic_cache:
+            return self._topic_cache[cache_key]
+
+        sf_filter = "|".join(f"subfields/{sid}" for sid in subfield_ids)
+        all_ids = []
+        page = 1
+        while True:
+            data = self._make_request("topics", {
+                "filter": f"subfield.id:{sf_filter}",
+                "per_page": 200,
+                "page": page,
+            })
+            results = data.get("results", [])
+            if not results:
+                break
+            all_ids.extend(r["id"].split("/")[-1] for r in results)
+            if len(results) < 200:
+                break
+            page += 1
+            time.sleep(0.1)
+        self._topic_cache[cache_key] = all_ids
+        return all_ids
+
+    def resolve_topic_ids_for_field(self, field_id: str) -> List[str]:
+        """Fetch all topic IDs that belong to the given field."""
+        cache_key = f"field:{field_id}"
+        if cache_key in self._topic_cache:
+            return self._topic_cache[cache_key]
+
+        all_ids = []
+        page = 1
+        while True:
+            data = self._make_request("topics", {
+                "filter": f"field.id:fields/{field_id}",
+                "per_page": 200,
+                "page": page,
+            })
+            results = data.get("results", [])
+            if not results:
+                break
+            all_ids.extend(r["id"].split("/")[-1] for r in results)
+            if len(results) < 200:
+                break
+            page += 1
+            time.sleep(0.1)
+        self._topic_cache[cache_key] = all_ids
+        return all_ids
+
     # ── Filter builder ───────────────────────────────────────────────
+
+    MAX_OR_VALUES = 100  # OpenAlex rejects >100 pipe-separated values
+
+    def _resolve_all_topic_ids(
+        self,
+        topic_ids: Optional[List[str]] = None,
+        field_id: Optional[str] = None,
+        subfield_ids: Optional[List[str]] = None,
+    ) -> List[str]:
+        """Resolve subfield/field selections + keyword topics into a single list of topic IDs."""
+        resolved = []
+        if subfield_ids:
+            resolved = self.resolve_topic_ids_for_subfields(subfield_ids)
+        elif field_id:
+            resolved = self.resolve_topic_ids_for_field(field_id)
+
+        if topic_ids:
+            seen = set(resolved)
+            resolved.extend(tid for tid in topic_ids if tid not in seen)
+        return resolved
+
+    def _build_base_filter(
+        self,
+        h_index_min: Optional[int] = None,
+        h_index_max: Optional[int] = None,
+        country_codes: Optional[List[str]] = None,
+        exclude_country_codes: Optional[List[str]] = None,
+        require_orcid: bool = False,
+    ) -> str:
+        """Build filter string excluding topic IDs (those are handled via batching)."""
+        filters = []
+        if h_index_min is not None:
+            filters.append(f"summary_stats.h_index:>{h_index_min - 1}")
+        if h_index_max is not None:
+            filters.append(f"summary_stats.h_index:<{h_index_max + 1}")
+        if country_codes:
+            filters.append(f"last_known_institutions.country_code:{'|'.join(country_codes)}")
+        if exclude_country_codes:
+            for cc in exclude_country_codes:
+                filters.append(f"last_known_institutions.country_code:!{cc}")
+        if require_orcid:
+            filters.append("has_orcid:true")
+        return ",".join(filters)
 
     def build_filter(
         self,
@@ -118,40 +219,33 @@ class OpenAlexClient:
         subfield_ids: Optional[List[str]] = None,
         require_orcid: bool = False,
     ) -> str:
-        """Build the filter string for the OpenAlex /authors endpoint."""
-        filters = []
+        """Build the filter string for the OpenAlex /authors endpoint.
 
-        if h_index_min is not None:
-            filters.append(f"summary_stats.h_index:>{h_index_min - 1}")
-        if h_index_max is not None:
-            filters.append(f"summary_stats.h_index:<{h_index_max + 1}")
-
-        # Include countries (OR)
-        if country_codes:
-            filters.append(f"last_known_institutions.country_code:{'|'.join(country_codes)}")
-
-        # Exclude countries
-        if exclude_country_codes:
-            for cc in exclude_country_codes:
-                filters.append(f"last_known_institutions.country_code:!{cc}")
-
-        # Field-level filter (single filter covers entire field — no 25-topic limit)
-        if subfield_ids:
-            sf_filter = "|".join(f"https://openalex.org/subfields/{sid}" for sid in subfield_ids)
-            filters.append(f"topics.subfield.id:{sf_filter}")
-        elif field_id:
-            filters.append(f"topics.field.id:https://openalex.org/fields/{field_id}")
-
-        # Additional keyword topic IDs
-        if topic_ids:
-            filters.append(f"topics.id:{'|'.join(topic_ids)}")
-
-        if require_orcid:
-            filters.append("has_orcid:true")
-
-        return ",".join(filters)
+        If topic count exceeds MAX_OR_VALUES, only the first batch is included.
+        For proper handling of large topic sets, use search_authors / get_total_count directly.
+        """
+        base = self._build_base_filter(
+            h_index_min=h_index_min, h_index_max=h_index_max,
+            country_codes=country_codes, exclude_country_codes=exclude_country_codes,
+            require_orcid=require_orcid,
+        )
+        all_topic_ids = self._resolve_all_topic_ids(topic_ids, field_id, subfield_ids)
+        if all_topic_ids:
+            chunk = all_topic_ids[:self.MAX_OR_VALUES]
+            topic_part = f"topics.id:{'|'.join(chunk)}"
+            return f"{base},{topic_part}" if base else topic_part
+        return base
 
     # ── Author search ────────────────────────────────────────────────
+
+    def _topic_batches(self, all_topic_ids: List[str]) -> List[List[str]]:
+        """Split topic IDs into chunks of MAX_OR_VALUES."""
+        if not all_topic_ids:
+            return [[]]
+        return [
+            all_topic_ids[i:i + self.MAX_OR_VALUES]
+            for i in range(0, len(all_topic_ids), self.MAX_OR_VALUES)
+        ]
 
     def search_authors(
         self,
@@ -166,41 +260,56 @@ class OpenAlexClient:
         max_results: int = 2000,
         per_page: int = 200,
     ) -> Generator[dict, None, None]:
-        """Search for authors, yielding parsed records with automatic pagination."""
-        filter_str = self.build_filter(
-            h_index_min=h_index_min,
-            h_index_max=h_index_max,
-            country_codes=country_codes,
-            exclude_country_codes=exclude_country_codes,
-            topic_ids=topic_ids,
-            field_id=field_id,
-            subfield_ids=subfield_ids,
+        """Search for authors, yielding parsed records with automatic pagination.
+
+        When topic IDs exceed 100, runs multiple batched queries and deduplicates.
+        """
+        base_filter = self._build_base_filter(
+            h_index_min=h_index_min, h_index_max=h_index_max,
+            country_codes=country_codes, exclude_country_codes=exclude_country_codes,
             require_orcid=require_orcid,
         )
+        all_topic_ids = self._resolve_all_topic_ids(topic_ids, field_id, subfield_ids)
+        batches = self._topic_batches(all_topic_ids)
 
-        cursor = "*"
+        seen_ids: set = set()
         total_yielded = 0
 
-        while cursor and total_yielded < max_results:
-            params = {
-                "filter": filter_str,
-                "select": "id,display_name,orcid,summary_stats,last_known_institutions,works_count,cited_by_count,topics",
-                "per_page": min(per_page, max_results - total_yielded),
-                "cursor": cursor,
-            }
-            data = self._make_request("authors", params)
-            results = data.get("results", [])
-            if not results:
+        for batch in batches:
+            if total_yielded >= max_results:
                 break
 
-            for author in results:
-                yield self._parse_author(author)
-                total_yielded += 1
-                if total_yielded >= max_results:
+            if batch:
+                topic_part = f"topics.id:{'|'.join(batch)}"
+                filter_str = f"{base_filter},{topic_part}" if base_filter else topic_part
+            else:
+                filter_str = base_filter
+
+            cursor = "*"
+            while cursor and total_yielded < max_results:
+                params = {
+                    "filter": filter_str,
+                    "select": "id,display_name,orcid,summary_stats,last_known_institutions,works_count,cited_by_count,topics",
+                    "per_page": min(per_page, max_results - total_yielded),
+                    "cursor": cursor,
+                }
+                data = self._make_request("authors", params)
+                results = data.get("results", [])
+                if not results:
                     break
 
-            cursor = data.get("meta", {}).get("next_cursor")
-            time.sleep(0.1)
+                for author in results:
+                    aid = author.get("id")
+                    if aid in seen_ids:
+                        continue
+                    seen_ids.add(aid)
+                    yield self._parse_author(author)
+                    total_yielded += 1
+                    if total_yielded >= max_results:
+                        break
+
+                cursor = data.get("meta", {}).get("next_cursor")
+                time.sleep(0.1)
 
     def _parse_author(self, author: dict) -> dict:
         """Parse raw OpenAlex author record into app format."""
@@ -251,16 +360,22 @@ class OpenAlexClient:
         subfield_ids: Optional[List[str]] = None,
         require_orcid: bool = False,
     ) -> int:
-        """Get total author count without fetching all data."""
-        filter_str = self.build_filter(
-            h_index_min=h_index_min,
-            h_index_max=h_index_max,
-            country_codes=country_codes,
-            exclude_country_codes=exclude_country_codes,
-            topic_ids=topic_ids,
-            field_id=field_id,
-            subfield_ids=subfield_ids,
+        """Get total author count. Sums across batches when >100 topic IDs."""
+        base_filter = self._build_base_filter(
+            h_index_min=h_index_min, h_index_max=h_index_max,
+            country_codes=country_codes, exclude_country_codes=exclude_country_codes,
             require_orcid=require_orcid,
         )
-        data = self._make_request("authors", {"filter": filter_str, "per_page": 1})
-        return data.get("meta", {}).get("count", 0)
+        all_topic_ids = self._resolve_all_topic_ids(topic_ids, field_id, subfield_ids)
+        batches = self._topic_batches(all_topic_ids)
+
+        total = 0
+        for batch in batches:
+            if batch:
+                topic_part = f"topics.id:{'|'.join(batch)}"
+                filter_str = f"{base_filter},{topic_part}" if base_filter else topic_part
+            else:
+                filter_str = base_filter
+            data = self._make_request("authors", {"filter": filter_str, "per_page": 1})
+            total += data.get("meta", {}).get("count", 0)
+        return total
