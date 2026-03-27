@@ -137,9 +137,10 @@ class OpenAlexClient:
 
         # Field-level filter (single filter covers entire field — no 25-topic limit)
         if subfield_ids:
-            filters.append(f"topics.subfield.id:subfields/{'|subfields/'.join(subfield_ids)}")
+            sf_filter = "|".join(f"https://openalex.org/subfields/{sid}" for sid in subfield_ids)
+            filters.append(f"topics.subfield.id:{sf_filter}")
         elif field_id:
-            filters.append(f"topics.field.id:fields/{field_id}")
+            filters.append(f"topics.field.id:https://openalex.org/fields/{field_id}")
 
         # Additional keyword topic IDs
         if topic_ids:
