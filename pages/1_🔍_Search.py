@@ -4,7 +4,7 @@ import streamlit as st
 import json
 
 from openalex_client import OpenAlexClient
-from geography import CONTINENTS, COUNTRIES, get_country_codes_for_continents
+from geography import CONTINENTS, COUNTRIES, get_openalex_continent_codes
 from config import DEFAULT_H_INDEX_MIN, DEFAULT_H_INDEX_MAX, DEFAULT_MAX_RESULTS
 
 st.header("🔍 Search Researchers")
@@ -111,21 +111,21 @@ selected_continents = st.sidebar.multiselect(
     key="continent_select",
 )
 
-# Auto-fill country codes from continents
-continent_codes = get_country_codes_for_continents(selected_continents) if selected_continents else []
+# Auto-resolve continent codes for OpenAlex native filter
+continent_api_codes = get_openalex_continent_codes(selected_continents) if selected_continents else []
 
 # Let user further refine
 all_country_names = sorted(COUNTRIES.keys())
 include_countries = st.sidebar.multiselect(
-    "Include countries",
+    "Include specific countries",
     options=all_country_names,
     default=[],
     key="include_countries",
 )
 include_codes = [COUNTRIES[c] for c in include_countries if c in COUNTRIES]
 
-# Combine continent + manual country codes
-all_include_codes = list(set(continent_codes + include_codes)) if (continent_codes or include_codes) else None
+# Country codes only from manual selection (continents handled natively)
+all_include_codes = include_codes if include_codes else None
 
 exclude_countries = st.sidebar.multiselect(
     "Exclude countries",
@@ -206,9 +206,7 @@ if st.button("🔍 Search OpenAlex", type="primary", use_container_width=True):
     if exclude_invited and st.session_state.get("db_ready"):
         try:
             from db_client import get_all_sent
-            for row in get_all_sent():
-                if row.get("orcid_id"):
-                    excluded_orcids.add(row["orcid_id"])
+            excluded_orcids = get_all_sent()
         except Exception:
             pass
 
@@ -221,6 +219,7 @@ if st.button("🔍 Search OpenAlex", type="primary", use_container_width=True):
             h_index_max=h_max,
             country_codes=all_include_codes,
             exclude_country_codes=exclude_codes,
+            continent_codes=continent_api_codes or None,
             topic_ids=topic_ids,
             field_id=field_id,
             subfield_ids=subfield_ids,
@@ -236,6 +235,7 @@ if st.button("🔍 Search OpenAlex", type="primary", use_container_width=True):
         h_index_max=h_max,
         country_codes=all_include_codes,
         exclude_country_codes=exclude_codes,
+        continent_codes=continent_api_codes or None,
         topic_ids=topic_ids,
         field_id=field_id,
         subfield_ids=subfield_ids,
@@ -274,13 +274,28 @@ if st.button("🔍 Search OpenAlex", type="primary", use_container_width=True):
     st.session_state.last_search_params = {
         "h_index_min": h_min, "h_index_max": h_max,
         "country_codes": all_include_codes, "exclude_country_codes": exclude_codes,
+        "continent_codes": continent_api_codes or None,
         "topic_ids": topic_ids, "field_id": field_id,
         "subfield_ids": subfield_ids, "require_orcid": require_orcid,
     }
+    # Auto-save results to DB
+    if st.session_state.get("db_ready"):
+        try:
+            from db_client import save_cached_results
+            save_cached_results(
+                authors=authors,
+                search_params=st.session_state.last_search_params,
+                resume_state=client.last_search_state,
+                total_count=total,
+            )
+        except Exception:
+            pass
     st.success(f"✅ Found **{len(authors)}** authors after filters")
 
 # ── Show current results summary + Load More ──
 if st.session_state.get("search_done") and st.session_state.get("authors"):
+    if st.session_state.pop("_restored_from_cache", False):
+        st.info("📂 Previous search results restored from database.")
     n = len(st.session_state.authors)
     with_email = sum(1 for a in st.session_state.authors if a.get("email"))
     total_available = st.session_state.get("search_total", n)
@@ -298,9 +313,7 @@ if st.session_state.get("search_done") and st.session_state.get("authors"):
             if st.session_state.get("exclude_invited") and st.session_state.get("db_ready"):
                 try:
                     from db_client import get_all_sent
-                    for row in get_all_sent():
-                        if row.get("orcid_id"):
-                            excluded_orcids.add(row["orcid_id"])
+                    excluded_orcids = get_all_sent()
                 except Exception:
                     pass
             # Also exclude already-fetched authors by ID
@@ -340,6 +353,18 @@ if st.session_state.get("search_done") and st.session_state.get("authors"):
 
             st.session_state.authors.extend(new_authors)
             st.session_state.search_resume_state = client.last_search_state
+            # Auto-save updated results to DB
+            if st.session_state.get("db_ready"):
+                try:
+                    from db_client import save_cached_results
+                    save_cached_results(
+                        authors=st.session_state.authors,
+                        search_params=st.session_state.get("last_search_params"),
+                        resume_state=client.last_search_state,
+                        total_count=st.session_state.get("search_total", 0),
+                    )
+                except Exception:
+                    pass
             st.success(f"✅ Loaded **{len(new_authors)}** more authors (total: **{len(st.session_state.authors):,}**)")
             st.rerun()
     else:

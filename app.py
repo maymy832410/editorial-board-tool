@@ -29,6 +29,21 @@ if not st.session_state.db_ready:
     except Exception:
         pass  # DB may not be configured in local dev
 
+# ── Restore cached results on new session ──
+if st.session_state.db_ready and not st.session_state.search_done:
+    try:
+        from db_client import load_cached_results
+        cached = load_cached_results()
+        if cached and cached.get("authors"):
+            st.session_state.authors = cached["authors"]
+            st.session_state.search_done = True
+            st.session_state.search_resume_state = cached.get("resume_state")
+            st.session_state.search_total = cached.get("total_count", len(cached["authors"]))
+            st.session_state.last_search_params = cached.get("search_params")
+            st.session_state._restored_from_cache = True
+    except Exception:
+        pass
+
 # ── Home page ──
 st.title("📬 Editorial Board Invitation Tool")
 

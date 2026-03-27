@@ -126,8 +126,8 @@ sent_set = set()
 if st.session_state.get("db_ready"):
     try:
         from db_client import get_all_sent, get_all_bounced
-        sent_set = {r["orcid_id"] for r in get_all_sent() if r.get("orcid_id")}
-        bounced_set = {r["email"].lower() for r in get_all_bounced() if r.get("email")}
+        sent_set = get_all_sent()
+        bounced_set = {e.lower() for e in get_all_bounced() if e}
     except Exception:
         pass
 
@@ -227,7 +227,7 @@ if sendable:
         col1, col2, col3, col4 = st.columns([3, 3, 2, 2])
         col1.write(name)
         col2.write(email)
-        col3.write(author.get("institution", "")[:30])
+        col3.write((author.get("institution") or "")[:30])
 
         if col4.button("Send", key=f"send_{orcid_id or name}"):
             formatted = format_template(

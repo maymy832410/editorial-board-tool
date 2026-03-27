@@ -191,6 +191,7 @@ class OpenAlexClient:
         h_index_max: Optional[int] = None,
         country_codes: Optional[List[str]] = None,
         exclude_country_codes: Optional[List[str]] = None,
+        continent_codes: Optional[List[str]] = None,
         require_orcid: bool = False,
     ) -> str:
         """Build filter string excluding topic IDs (those are handled via batching)."""
@@ -199,6 +200,8 @@ class OpenAlexClient:
             filters.append(f"summary_stats.h_index:>{h_index_min - 1}")
         if h_index_max is not None:
             filters.append(f"summary_stats.h_index:<{h_index_max + 1}")
+        if continent_codes:
+            filters.append(f"last_known_institutions.continent:{'|'.join(continent_codes)}")
         if country_codes:
             filters.append(f"last_known_institutions.country_code:{'|'.join(country_codes)}")
         if exclude_country_codes:
@@ -217,6 +220,7 @@ class OpenAlexClient:
         topic_ids: Optional[List[str]] = None,
         field_id: Optional[str] = None,
         subfield_ids: Optional[List[str]] = None,
+        continent_codes: Optional[List[str]] = None,
         require_orcid: bool = False,
     ) -> str:
         """Build the filter string for the OpenAlex /authors endpoint.
@@ -227,7 +231,7 @@ class OpenAlexClient:
         base = self._build_base_filter(
             h_index_min=h_index_min, h_index_max=h_index_max,
             country_codes=country_codes, exclude_country_codes=exclude_country_codes,
-            require_orcid=require_orcid,
+            continent_codes=continent_codes, require_orcid=require_orcid,
         )
         all_topic_ids = self._resolve_all_topic_ids(topic_ids, field_id, subfield_ids)
         if all_topic_ids:
@@ -256,6 +260,7 @@ class OpenAlexClient:
         topic_ids: Optional[List[str]] = None,
         field_id: Optional[str] = None,
         subfield_ids: Optional[List[str]] = None,
+        continent_codes: Optional[List[str]] = None,
         require_orcid: bool = False,
         max_results: int = 2000,
         per_page: int = 200,
@@ -273,7 +278,7 @@ class OpenAlexClient:
         base_filter = self._build_base_filter(
             h_index_min=h_index_min, h_index_max=h_index_max,
             country_codes=country_codes, exclude_country_codes=exclude_country_codes,
-            require_orcid=require_orcid,
+            continent_codes=continent_codes, require_orcid=require_orcid,
         )
         all_topic_ids = self._resolve_all_topic_ids(topic_ids, field_id, subfield_ids)
         batches = self._topic_batches(all_topic_ids)
@@ -387,13 +392,14 @@ class OpenAlexClient:
         topic_ids: Optional[List[str]] = None,
         field_id: Optional[str] = None,
         subfield_ids: Optional[List[str]] = None,
+        continent_codes: Optional[List[str]] = None,
         require_orcid: bool = False,
     ) -> int:
         """Get total author count. Sums across batches when >100 topic IDs."""
         base_filter = self._build_base_filter(
             h_index_min=h_index_min, h_index_max=h_index_max,
             country_codes=country_codes, exclude_country_codes=exclude_country_codes,
-            require_orcid=require_orcid,
+            continent_codes=continent_codes, require_orcid=require_orcid,
         )
         all_topic_ids = self._resolve_all_topic_ids(topic_ids, field_id, subfield_ids)
         batches = self._topic_batches(all_topic_ids)

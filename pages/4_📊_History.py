@@ -11,12 +11,12 @@ st.subheader("📬 Sent Invitations")
 
 if st.session_state.get("db_ready"):
     try:
-        from db_client import get_all_sent, get_sent_count
+        from db_client import get_sent_details, get_sent_count
         total_sent = get_sent_count()
         st.metric("Total Sent", total_sent)
 
         if total_sent > 0:
-            sent_rows = get_all_sent()
+            sent_rows = get_sent_details(limit=total_sent)
             df_sent = pd.DataFrame(sent_rows)
             if "sent_at" in df_sent.columns:
                 df_sent["sent_at"] = pd.to_datetime(df_sent["sent_at"])

@@ -86,3 +86,19 @@ def get_country_codes_for_continents(continent_names: list[str]) -> list[str]:
     for name in continent_names:
         codes.update(CONTINENTS.get(name, []))
     return sorted(codes)
+
+
+# OpenAlex continent filter values
+CONTINENT_TO_OPENALEX = {
+    "Asia": "asia",
+    "Europe": "europe",
+    "North America": "north_america",
+    "South America": "south_america",
+    "Africa": "africa",
+    "Oceania": "oceania",
+}
+
+
+def get_openalex_continent_codes(continent_names: list[str]) -> list[str]:
+    """Return OpenAlex continent filter values for the given continent display names."""
+    return [CONTINENT_TO_OPENALEX[c] for c in continent_names if c in CONTINENT_TO_OPENALEX]

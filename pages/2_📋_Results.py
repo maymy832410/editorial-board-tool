@@ -22,8 +22,8 @@ bounced_set = set()
 if st.session_state.get("db_ready"):
     try:
         from db_client import get_all_sent, get_all_bounced
-        sent_set = {r["orcid_id"] for r in get_all_sent() if r.get("orcid_id")}
-        bounced_set = {r["email"].lower() for r in get_all_bounced() if r.get("email")}
+        sent_set = get_all_sent()
+        bounced_set = {e.lower() for e in get_all_bounced() if e}
     except Exception:
         pass
 previously_sent = sum(1 for a in authors if a.get("orcid_id") in sent_set)
@@ -112,6 +112,18 @@ if need_email_count > 0:
 
         new_emails = sum(1 for a in updated if a.get("email")) - (len(updated) - need_email_count)
         st.success(f"✅ Found **{new_emails}** new emails")
+        # Auto-save updated results to DB
+        if st.session_state.get("db_ready"):
+            try:
+                from db_client import save_cached_results
+                save_cached_results(
+                    authors=st.session_state.authors,
+                    search_params=st.session_state.get("last_search_params"),
+                    resume_state=st.session_state.get("search_resume_state"),
+                    total_count=st.session_state.get("search_total", 0),
+                )
+            except Exception:
+                pass
         st.rerun()
 
 # ── Author table ──

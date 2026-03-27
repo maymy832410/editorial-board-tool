@@ -63,6 +63,17 @@ def init_db():
                     created_at TIMESTAMPTZ DEFAULT NOW(),
                     updated_at TIMESTAMPTZ DEFAULT NOW()
                 );
+                CREATE TABLE IF NOT EXISTS cached_results (
+                    id SERIAL PRIMARY KEY,
+                    session_key TEXT NOT NULL DEFAULT 'default',
+                    authors JSONB NOT NULL DEFAULT '[]',
+                    search_params JSONB,
+                    resume_state JSONB,
+                    total_count INTEGER DEFAULT 0,
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_cached_results_key
+                    ON cached_results (session_key);
             """)
         conn.commit()
     finally:
@@ -326,3 +337,58 @@ def check_connection() -> Dict:
         return {"available": True, "error": ""}
     except Exception as e:
         return {"available": False, "error": str(e)[:100]}
+
+
+# ─── Cached search results ──────────────────────────────────────────
+
+def save_cached_results(
+    authors: list,
+    search_params: Optional[dict] = None,
+    resume_state: Optional[dict] = None,
+    total_count: int = 0,
+    session_key: str = "default",
+) -> bool:
+    """Persist current search results to DB so they survive page navigation / browser close."""
+    conn = _conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """INSERT INTO cached_results (session_key, authors, search_params, resume_state, total_count, updated_at)
+                   VALUES (%s, %s, %s, %s, %s, NOW())
+                   ON CONFLICT (session_key)
+                   DO UPDATE SET authors=EXCLUDED.authors, search_params=EXCLUDED.search_params,
+                                 resume_state=EXCLUDED.resume_state, total_count=EXCLUDED.total_count,
+                                 updated_at=NOW()""",
+                (session_key, json.dumps(authors), json.dumps(search_params),
+                 json.dumps(resume_state), total_count),
+            )
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        print(f"save_cached_results error: {e}")
+        return False
+    finally:
+        _put(conn)
+
+
+def load_cached_results(session_key: str = "default") -> Optional[Dict]:
+    """Load persisted search results."""
+    conn = _conn()
+    try:
+        with conn.cursor(cursor_factory=RealDictCursor) as cur:
+            cur.execute(
+                "SELECT authors, search_params, resume_state, total_count FROM cached_results WHERE session_key=%s",
+                (session_key,),
+            )
+            row = cur.fetchone()
+            if row:
+                result = dict(row)
+                # Parse JSON strings if needed
+                for key in ("authors", "search_params", "resume_state"):
+                    if isinstance(result.get(key), str):
+                        result[key] = json.loads(result[key])
+                return result
+        return None
+    finally:
+        _put(conn)
